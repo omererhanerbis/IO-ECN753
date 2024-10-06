@@ -145,97 +145,128 @@ data_agents = pd.read_csv("Data/agent_data.csv")
 data_products = pd.read_csv("Data/product_data.csv")
 
 
-n_markets = data_products["market_ids"].unique().size
-n_products = data_products["product_ids"].unique().size
-n_agents = int(1/data_agents.iloc[0, 2])                                        # since equally weighted and all markets have same number of consumers
+#Matrices for product, demographic and instrumental variables
+X_p = data_products[["prices", "sugar"]].values
+X_d = data_agents[["income", "nodes0"]].values
+Z = data_products[["demand_instruments0",
+                  "demand_instruments1",
+                  "demand_instruments2",
+                  "demand_instruments3",
+                  "demand_instruments4",
+                  "demand_instruments5",
+                  "demand_instruments6",
+                  "demand_instruments7",
+                  "demand_instruments8",
+                  "demand_instruments9",
+                  "demand_instruments10",
+                  "demand_instruments11",
+                  "demand_instruments12",
+                  "demand_instruments13",
+                  "demand_instruments14",
+                  "demand_instruments15",
+                  "demand_instruments16",
+                  "demand_instruments17",
+                  "demand_instruments18",
+                  "demand_instruments19"]]
 
+#Coefficients for product characteristics
 np.random.seed(42)
-#Random coefficients
-theta = np.random.normal(loc = 0, 
-                               scale = 1, 
-                               size = 3)                                        # price & sugar
-sigma = np.random.normal(loc = 0,
-                               scale = 1,
-                               size = 3)                                        # income effect & taste_shock
 
-#U = delta + random_coef*charac
-def utility(delta, product_data, agent_data, random_coef):
-    price, sugar = product_data["prices"], product_data["sugar"]
-    income, taste_shock = agent_data["income"], agent_data["nodes0"]
+theta = np.array([np.random.normal(), np.random.normal()])
+sigma = np.array([np.random.normal(), np.random.normal()])
+
+def utility(delta, X_p, X_d, theta, sigma):
+    delta_expanded = np.repeat(delta, X_d.shape[0], axis = 0).reshape(len(delta), X_d.shape[0])
+    mu_ijt = np.dot(X_p, theta)[:, np.newaxis] + np.dot(X_d, sigma)
+    U = delta_expanded + mu_ijt
+    return U
+
+def comp_market_shares(delta, X_p, X_d, theta, sigma):
+    U = utility(delta, X_p, X_d, theta, sigma)
     
-    alpha = random_coef[3] + random_coef[4]*income + random_coef[5]*taste_shock
-    beta_0 = random_coef[0] + random_coef[1]*income
-    beta_sugar = random_coef[2] 
-    return delta + beta_0 + beta_sugar*sugar + alpha*price
+    #Logit
+    exp_U = np.exp(U)
+    sum_exp_U = np.sum(exp_U, axis = 0)
+    choice_prob = exp_U / sum_exp_U
+    
+    #Market shares for each product
+    mkt_share = np.mean(choice_prob, axis = 1)
+    return mkt_share
 
-#Market shares calculation
 @jit
-def est_market_shares(delta, products, demographics, random_coef):
-    market_ids = data_products["market_ids"].unique()
-    mkt_shares = []
-    
-    for t in market_ids:
-        market_products = products[products["market_ids"] == t]
-        market_consumers = demographics[demographics["market_ids"] == t]
+def contraction_mapping(delta, X_p, X_d, obs_shares, theta, sigma, tolerance = 10e-6, max_iterations = 1000):
+    it = 0
+    while it < max_iterations:
+        predicted_shares = comp_market_shares(delta, X_p, X_d, theta, sigma)
+        delta_new = delta + np.log(obs_shares / predicted_shares)
         
-        #Utility for each consumer in market t
-        utilities = []
-        for i, product_data in market_products.iterrows():
-            product_util = []
-            for _, consumer_data in market_consumers.iterrows():
-                product_util.append(utility(delta, product_data, consumer_data, random_coef))
-            utilities.append(product_util)
-            
-        #From utilities to probabilities
-        utilities = np.array(utilities)
-        exp_utilities = np.exp(utilities)
-        mkt_probs = exp_utilities/np.sum(exp_utilities, axis = 0)
-        
-        #Avg Mkt Share
-        avg_mkt_share = np.mean(mkt_probs, axis = 1)
-        mkt_shares.append(avg_mkt_share)
-        
-    return np.concatenate(mkt_shares)
-    
-#Objective function: GMM to minimize observed and sim shares
-def gmm_obj(delta, products, demographics, observed_shares, random_coef):
-    predicted_shares = est_market_shares(delta, products, demographics, random_coef)
-    moment_error = observed_shares - predicted_shares
-    return np.sum(moment_error**2)                                              # we want to minimize square error
-
-#Estimate delta by minimizing the square error
-
-# observed_shares = data_products.loc[data_products["market_ids"]=="C01Q1", "shares"].values
-    
-observed_shares = data_products["shares"].values
-random_coef = np.concatenate([theta, sigma])
-
-delta_init = np.zeros(n_markets)
-result = minimize(gmm_obj, 
-                  delta_init, 
-                  args = (data_products, data_agents, observed_shares, random_coef), 
-                  method = "BFGS") 
-
-delta_est = result.x
-
-#Contraction mapping
-@jit
-def contraction_mapping(delta, products, demographics, observed_shares, random_coef, tolerance = 10e-15, max_iterations = 1000):
-    iter = 0
-    while iter < max_iterations:
-        predicted_shares = est_market_shares(delta, products, demographics, random_coef)
-        delta_new = delta + np.log(observed_shares / predicted_shares)
         if np.max(np.abs(delta_new - delta)) < tolerance:
             break
+        
         delta = delta_new
-        iter += 1
+        it += 1
+    
     return delta
 
-#Apply contraction mapping
-delta_sol = contraction_mapping(delta_init, data_products, data_agents, observed_shares, random_coef)
+@jit
+def gmm_w_inst(delta, X_p, X_d, Z, obs_shares, theta, sigma):
+    predicted_shares = comp_market_shares(delta, X_p, X_d, theta, sigma)
+    
+    moment_error = obs_shares - predicted_shares
+    weighted_moments = np.dot(moment_error.T, Z)
+    
+    return np.sum(weighted_moments**2)
+
+#Compute delta
+delta_init = np.zeros(X_p.shape[0])
+results = minimize(gmm_w_inst, 
+                   delta_init, 
+                   args = (X_p, X_d, Z, data_products["shares"].values, theta, sigma),
+                   method = "BFGS")
+
+delta_estimates = results.x
+                                            # deltas for first market
+
+##############################################################################
+######### Part 2.b
+##############################################################################
+
+def comp_elasticities(delta, X_p, X_d, theta, sigma, prices, pred_shares):
+    
+    n_prod = X_p.shape[0]
+
+    theta_price = theta[0]
+
+    elasticities = np.zeros((n_prod, n_prod))
+
+    for j in range(n_prod):
+        elasticities[j] = theta_price*prices[j] * (1 - pred_shares[j])
+
+    for j in range(n_prod):
+        elasticities[j] = elasticities[j]/pred_shares[j]
+        
+    return elasticities
+
+prices = data_products["prices"].values
+
+pred_mkt_shares = comp_market_shares(delta_estimates, X_p, X_d, theta, sigma)
+
+elasticities = comp_elasticities(delta_estimates, X_p, X_d, theta, sigma, prices, pred_mkt_shares)
+
+elasticities_C01Q1 = elasticities[0:24,0]
+
+plt.scatter(data_products.iloc[0:24, 2], elasticities_C01Q1)
+plt.title("Prices vs estimated elasticities in market C01Q1")
+plt.xlabel("Prices")
+plt.ylabel("Estimated elasticities")
+plt.show()
+
+plt.scatter(data_products.iloc[0:24, 2], price_elast.iloc[0:24], color = "blue", label = "2SLS")
+plt.scatter(data_products.iloc[0:24, 2], elasticities_C01Q1, color = "red", label = "BLP")
+plt.title("Prices vs estimated elasticities in market C01Q1")
+plt.xlabel("Prices")
+plt.ylabel("Estimated elasticities")
+plt.legend()
+plt.show()
 
 
-
-                                
-                                     
-                                
