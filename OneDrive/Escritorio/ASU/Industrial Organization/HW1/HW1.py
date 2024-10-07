@@ -74,7 +74,7 @@ print(m_ols.fit())
 ##############################################################################
 ######### Part 1.b
 ##############################################################################
-m_stg1 = PanelOLS(dependent = data_products["sugar"],
+m_stg1 = PanelOLS(dependent = data_products["prices"],
                   exog = data_products[["constant",
                                         "demand_instruments0",
                                         "demand_instruments1",
@@ -102,10 +102,10 @@ m_stg1 = PanelOLS(dependent = data_products["sugar"],
 m_stg1.fit()
 x_hat = m_stg1.fit().predict(fitted = True)
 
-data_products["sugar_hat"] = x_hat
+data_products["prices_hat"] = x_hat
 
 m_stg2 = PanelOLS(dependent = data_products["rel_shares"], 
-                    exog = data_products[["constant", "sugar_hat", "prices"]],
+                    exog = data_products[["constant", "prices_hat", "sugar"]],
                     entity_effects = False,
                     time_effects = False)
 
