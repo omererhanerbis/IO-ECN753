@@ -340,12 +340,16 @@ axes.set(title = "Prices vs estimated elasticities in market C01Q1",
          ylabel = "Estimated elasticities")
 plt.savefig("Figures/Problem2_Part_b_1.png")
 
+print("Correlation between price and elasticities using BLP is " + str(np.corrcoef(mkt_p, p_elast)[0,1]))
+
 figure, axes = plt.subplots()
 plt.scatter(mkt_p, mkt1_price_elast, label = "2SLS")
 axes.scatter(mkt_p, p_elast, label = "BLP")
+
 axes.set(title = "Prices vs estimated elasticities in market C01Q1", 
          xlabel = "Prices",
          ylabel = "Estimated elasticities")
+axes.legend()
 plt.savefig("Figures/Problem2_Part_b_2.png")
 
 fig, axes = plt.subplots()
@@ -358,8 +362,9 @@ axes.set(title="2SLS elasticities vs BLP elasticities in market C01Q1",
          xlabel="2SLS elasticities",
          ylabel="BLP elasticities")
 cbar = plt.colorbar(scatter)
-cbar.set_label('mkt_p values')
+cbar.set_label('Price')
 axes.set_xlim([-2.5, 0])
 axes.set_ylim([min_limit, max_limit])
-plt.show()
 plt.savefig("Figures/Problem2_Part_b_3.png")
+
+
