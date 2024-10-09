@@ -11,9 +11,9 @@ import pandas as pd
 from linearmodels.panel import PanelOLS
 from sklearn.preprocessing import LabelEncoder
 import matplotlib.pyplot as plt
-from numba import jit
-import scipy as sp
+#from numba import jit
 from scipy.optimize import minimize
+import time                                                                     # just to check how long it takes to run
 
 # Load data
 data_agents = pd.read_csv("Data/agent_data.csv")
@@ -125,14 +125,16 @@ data_products["shares_hat"] = 0
 for n in np.arange(0,len(data_products)):
     data_products.iloc[n, -1] = np.exp(data_products.iloc[n, -3] + np.log(data_products.iloc[n, -5]))
 
-price_elast = betas[2]*data_products["prices"]*(1 - data_products["shares"])
+price_elast = betas[1]*data_products["prices"]*(1 - data_products["shares"])
 
-plt.scatter(data_products.iloc[0:24, 2], price_elast.iloc[0:24])
-plt.title("Prices vs estimated elasticities in market C01Q1")
-plt.xlabel("Prices")
-plt.ylabel("Estimated elasticities")
-plt.show()
+mkt1_price_elast = price_elast.iloc[0:24]
 
+figure, axes = plt.subplots()
+axes.scatter(data_products.iloc[0:24, 2], mkt1_price_elast)
+axes.set(title = "Prices vs estimated elasticities in market C01Q1", 
+         xlabel = "Prices",
+         ylabel = "Estimated elasticities")
+plt.savefig("Figures/Problem1_Part_c.png")
 
 ##############################################################################
 ###### Problem 2
@@ -145,128 +147,219 @@ data_agents = pd.read_csv("Data/agent_data.csv")
 data_products = pd.read_csv("Data/product_data.csv")
 
 
-#Matrices for product, demographic and instrumental variables
-X_p = data_products[["prices", "sugar"]].values
-X_d = data_agents[["income", "nodes0"]].values
-Z = data_products[["demand_instruments0",
-                  "demand_instruments1",
-                  "demand_instruments2",
-                  "demand_instruments3",
-                  "demand_instruments4",
-                  "demand_instruments5",
-                  "demand_instruments6",
-                  "demand_instruments7",
-                  "demand_instruments8",
-                  "demand_instruments9",
-                  "demand_instruments10",
-                  "demand_instruments11",
-                  "demand_instruments12",
-                  "demand_instruments13",
-                  "demand_instruments14",
-                  "demand_instruments15",
-                  "demand_instruments16",
-                  "demand_instruments17",
-                  "demand_instruments18",
-                  "demand_instruments19"]]
 
-#Coefficients for product characteristics
-np.random.seed(42)
 
-theta = np.array([np.random.normal(), np.random.normal()])
-sigma = np.array([np.random.normal(), np.random.normal()])
+# Add constant and log_shares
+data_products["constant"] = 1
+data_products["log_shares"] = np.log(data_products["shares"]) 
 
-def utility(delta, X_p, X_d, theta, sigma):
-    delta_expanded = np.repeat(delta, X_d.shape[0], axis = 0).reshape(len(delta), X_d.shape[0])
-    mu_ijt = np.dot(X_p, theta)[:, np.newaxis] + np.dot(X_d, sigma)
-    U = delta_expanded + mu_ijt
-    return U
+# Take variables of interest
+obs_var = np.array(data_products[["market_ids", "constant", "sugar", "prices"]])
+obs_var_exo = np.array(data_products[["constant", "sugar"]])
+dist = np.array(data_agents[["market_ids", "income", "nodes0"]])
+shares = np.array(data_products[["market_ids", "shares"]])
+log_shares = np.array(data_products[["market_ids", "log_shares"]]) 
+#prices = np.array([data_products["market_ids", "prices"]])
+instruments = np.array(data_products.iloc[:, 6:26])
+instrumental_variables = np.concatenate((obs_var_exo, instruments), axis = 1)
+index_mkt = np.array(pd.unique(data_products["market_ids"]))
 
-def comp_market_shares(delta, X_p, X_d, theta, sigma):
-    U = utility(delta, X_p, X_d, theta, sigma)
+
+# Classify parameters
+K = obs_var_exo.shape[1]                                                        # Number of coefficients
+def ut_params(params):
+    params = np.array(params)
+    lin_param = np.array([params[0], 0, params[1]]).reshape(K + 1, 1)
+    demo_param = params[2:5].reshape(3, 1)
+    unobs_param = np.diag(np.array([0, 0, params[5]]))
+    return lin_param, demo_param, unobs_param
+
+
+#Functions for predicting shares
+def pred_shares_draw(delta, demo_param, unobs_param, obs_var, draw):
+    delta = delta.reshape(delta.size, 1)
+    demo_taste = demo_param*draw[0]
+    unobs_taste = (unobs_param @ np.array([[0], [0], [draw[1]]])
+                         ) # constructed numpy arrary with magic numbers because of model specification
+    nonlin_taste = (np.array(obs_var) @ (demo_taste + unobs_taste))
+    quantity = np.exp((delta + nonlin_taste).astype(float))
+    mkt_size = 1 + sum(quantity)                                                # 1 comes from outside option
+    shares = quantity/mkt_size
+    return shares.flatten()                                                     # so shares are a 1-D array
+
+def pred_shares(delta, demo_param, unobs_param, obs_var, dist):
+    shares_draw = (lambda y: pred_shares_draw(delta, demo_param, unobs_param, obs_var, y))
+    monte_carlo = np. apply_along_axis(shares_draw, 1, dist)
+    mkt_shares = np.mean(monte_carlo, axis = 0)
+    return mkt_shares
     
-    #Logit
-    exp_U = np.exp(U)
-    sum_exp_U = np.sum(exp_U, axis = 0)
-    choice_prob = exp_U / sum_exp_U
-    
-    #Market shares for each product
-    mkt_share = np.mean(choice_prob, axis = 1)
-    return mkt_share
 
-@jit
-def contraction_mapping(delta, X_p, X_d, obs_shares, theta, sigma, tolerance = 10e-6, max_iterations = 1000):
-    it = 0
-    while it < max_iterations:
-        predicted_shares = comp_market_shares(delta, X_p, X_d, theta, sigma)
-        delta_new = delta + np.log(obs_shares / predicted_shares)
+#@jit
+def mkt_inv(demo_param, unobs_param, obs_var, dist, log_shares, delta_guess=None, tolerance=1e-12, max_iteration=1000, error=1):
+    # Initialize delta_init based on whether delta_guess is provided
+    if delta_guess is None:                                              # If there is no guess at all on any delta
+        J = obs_var.shape[0]
+        delta_init = np.zeros((J, 1))  # Initialize with zeros
+    else:
+        delta_init = delta_guess
+
+    # while loop for iteration
+    iteration = 1
+    while error > tolerance:
         
-        if np.max(np.abs(delta_new - delta)) < tolerance:
-            break
+        pred_shares_loop = pred_shares(delta_init, demo_param, unobs_param, obs_var, dist)  
+        log_shares_hat = np.log(pred_shares_loop).reshape(pred_shares_loop.size, 1)
+        delta_loop = delta_init + log_shares - log_shares_hat 
+        error = np.max(np.abs(delta_init - delta_loop))
+        delta_init = delta_loop  # Update guess
+
+        # Break if max iterations reached
+        if iteration >= max_iteration:
+            break                                                               
         
-        delta = delta_new
-        it += 1
-    
-    return delta
+#        print("Iteration: " + str(iteration) + " | Error " + str(error))        #to make sure this thing is running b/c I was losing my mind when I did not have this
+        iteration += 1  # Increase iteration
 
-@jit
-def gmm_w_inst(delta, X_p, X_d, Z, obs_shares, theta, sigma):
-    predicted_shares = comp_market_shares(delta, X_p, X_d, theta, sigma)
-    
-    moment_error = obs_shares - predicted_shares
-    weighted_moments = np.dot(moment_error.T, Z)
-    
-    return np.sum(weighted_moments**2)
+    return delta_loop.flatten()
 
-#Compute delta
-delta_init = np.zeros(X_p.shape[0])
-results = minimize(gmm_w_inst, 
-                   delta_init, 
-                   args = (X_p, X_d, Z, data_products["shares"].values, theta, sigma),
-                   method = "BFGS")
+#@jit
+def inversion(demo_param, unobs_param, obs_var, dist, log_shares, index):
+    inversion = np.array([])  # Initialize empty array
+    prod_mkt = obs_var[:, 0]
+    agent_mkt = dist[:, 0]
 
-delta_estimates = results.x
-                                            # deltas for first market
+    for i in index:
+        prod_submkt = (prod_mkt == i)
+        agent_submkt = (agent_mkt == i)
+
+        loop_prod = obs_var[prod_submkt][:, 1:]
+        loop_dist = dist[agent_submkt][:, 1:]
+        loop_log_shares = log_shares[prod_submkt][:, 1:]
+
+        loop_inv = mkt_inv(demo_param, unobs_param, loop_prod, loop_dist, loop_log_shares)
+
+        inversion = np.concatenate((inversion, loop_inv.flatten()), axis=0)  # Use flatten to ensure 1D concatenation
+
+    return inversion
+
+
+#GMM
+def demand_shock(lin_param, demo_param, unobs_param, obs_var, dist, log_shares, index):
+    delta = inversion(demo_param, unobs_param, obs_var, dist, log_shares, index)
+    X = obs_var[:, 1:]
+    lin_taste = X @ lin_param
+    X_i = delta.reshape(delta.size, 1) - lin_taste.reshape(lin_taste.size, 1)
+    return X_i
+
+def proj_matrix(Z):
+    return Z @ np.linalg.inv(Z.T @ Z) @ Z.T
+
+def gmm_w_inst(lin_param, demo_param, unobs_param, obs_var, dist, log_shares, index, weights):
+    X_i = demand_shock(lin_param, demo_param, unobs_param, obs_var, dist, log_shares, index)
+    obj_fun = X_i.T @ weights @ X_i
+    return float(obj_fun)
+    
+#Elasticities
+def shares_price_deriv(lin_param, delta, demo_param, unobs_param, obs_var, dist):
+    nonlin_p_param = np.array([[float(demo_param[2])], [unobs_param[2, 2]]])
+    price_coef = lin_param[2] + dist @ nonlin_p_param
+    shares_int = (lambda y: pred_shares_draw(delta, demo_param, unobs_param, obs_var, y))
+    
+    shares_grid = np.apply_along_axis(shares_int, 1, dist)
+    shares_p_deriv_grid = price_coef*shares_grid*(1 - shares_grid)
+    shares_p_deriv = np.mean(shares_p_deriv_grid, axis = 0)
+    return shares_p_deriv
+
+
+#####
+# Computation
+#####
+
+weights = proj_matrix(instrumental_variables)
+
+# [ -3.,  -2.,   4.,   0., -33.,   1.]
+init_params = tuple([-3., -2., 4., 0., -33., 1.])                               # Thanks Chris
+
+lin_param, demo_param, unobs_param = ut_params(init_params)
+
+obj_fun = (lambda params: gmm_w_inst(*ut_params(params), 
+                                     obs_var, 
+                                     dist, 
+                                     log_shares, 
+                                     index_mkt, 
+                                     weights))
+
+tik = time.time()
+results = minimize(obj_fun, 
+                   init_params, 
+                   method = "L-BFGS-B",
+                   options = {"disp": True})    
+
+tok = time.time()
+print("run time: " + str((tok - tik)/60) + " minutes")
+
+estimates_blp = results.x
+print("================================================================================")
+print("                                      BLP                                       ")
+print("================================================================================")
+print(results.x)
 
 ##############################################################################
 ######### Part 2.b
 ##############################################################################
 
-def comp_elasticities(delta, X_p, X_d, theta, sigma, prices, pred_shares):
     
-    n_prod = X_p.shape[0]
+# set up numpy arrays for market C01Q1
+mkt_obs_var= np.array(data_products[data_products["market_ids"] == "C01Q1"][["constant", "sugar", "prices"]])
+mkt_dist = np.array(data_agents[data_agents["market_ids"] == "C01Q1"][["income", "nodes0"]])
+mkt_log_shares = np.array(data_products[data_products["market_ids"] == "C01Q1"]["log_shares"])
+mkt_log_shares = mkt_log_shares.reshape(mkt_log_shares.size, 1)
+mkt_p = np.array(data_products[data_products["market_ids"] == "C01Q1"]["prices"])
+mkt_shares = np.array(data_products[data_products["market_ids"] == "C01Q1"]["shares"])
+    
+    # Organize estimates into linear, demographic, and unobserved parameters
+K = mkt_obs_var.shape[1] - 1
 
-    theta_price = theta[0]
+lin_param, demo_param, unobs_param = ut_params(estimates_blp)
 
-    elasticities = np.zeros((n_prod, n_prod))
+mkt_inv = mkt_inv(demo_param, unobs_param, mkt_obs_var, mkt_dist, mkt_log_shares)
 
-    for j in range(n_prod):
-        elasticities[j] = theta_price*prices[j] * (1 - pred_shares[j])
+mkt_delta = mkt_inv[0]
+mkt_delta = mkt_delta.reshape(mkt_delta.size, 1)
+share_p_deriv = shares_price_deriv(lin_param, mkt_delta, demo_param, unobs_param, mkt_obs_var, mkt_dist)
 
-    for j in range(n_prod):
-        elasticities[j] = elasticities[j]/pred_shares[j]
-        
-    return elasticities
+p_elast = share_p_deriv*(mkt_p/mkt_shares)
 
-prices = data_products["prices"].values
 
-pred_mkt_shares = comp_market_shares(delta_estimates, X_p, X_d, theta, sigma)
+#Figures
 
-elasticities = comp_elasticities(delta_estimates, X_p, X_d, theta, sigma, prices, pred_mkt_shares)
+figure, axes = plt.subplots()
+axes.scatter(mkt_p, p_elast)
+axes.set(title = "Prices vs estimated elasticities in market C01Q1", 
+         xlabel = "Prices",
+         ylabel = "Estimated elasticities")
+plt.savefig("Figures/Problem2_Part_b_1.png")
 
-elasticities_C01Q1 = elasticities[0:24,0]
+figure, axes = plt.subplots()
+plt.scatter(mkt_p, mkt1_price_elast, label = "2SLS")
+axes.scatter(mkt_p, p_elast, label = "BLP")
+axes.set(title = "Prices vs estimated elasticities in market C01Q1", 
+         xlabel = "Prices",
+         ylabel = "Estimated elasticities")
+plt.savefig("Figures/Problem2_Part_b_2.png")
 
-plt.scatter(data_products.iloc[0:24, 2], elasticities_C01Q1)
-plt.title("Prices vs estimated elasticities in market C01Q1")
-plt.xlabel("Prices")
-plt.ylabel("Estimated elasticities")
+fig, axes = plt.subplots()
+scatter = plt.scatter(mkt1_price_elast, p_elast, c=mkt_p, cmap='jet', label='Elasticities')
+min_limit = min(np.min(mkt1_price_elast), np.min(p_elast))
+max_limit = max(np.max(mkt1_price_elast), np.max(p_elast))
+axes.plot([min_limit, max_limit], [min_limit, max_limit], linestyle="--", color="k", label='45-degree line')
+axes.text(-0.2, -0.1, "45°", fontsize=12, color="k", verticalalignment='bottom')
+axes.set(title="2SLS elasticities vs BLP elasticities in market C01Q1", 
+         xlabel="2SLS elasticities",
+         ylabel="BLP elasticities")
+cbar = plt.colorbar(scatter)
+cbar.set_label('mkt_p values')
+axes.set_xlim([-2.5, 0])
+axes.set_ylim([min_limit, max_limit])
 plt.show()
-
-plt.scatter(data_products.iloc[0:24, 2], price_elast.iloc[0:24], color = "blue", label = "2SLS")
-plt.scatter(data_products.iloc[0:24, 2], elasticities_C01Q1, color = "red", label = "BLP")
-plt.title("Prices vs estimated elasticities in market C01Q1")
-plt.xlabel("Prices")
-plt.ylabel("Estimated elasticities")
-plt.legend()
-plt.show()
-
-
+plt.savefig("Figures/Problem2_Part_b_3.png")
