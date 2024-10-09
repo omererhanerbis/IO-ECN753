@@ -13,6 +13,7 @@ To get started, navigate to the directory, create and activate the environment w
 ```console
 $ conda env create -f environment_io.yml
 $ conda activate environment_io.yml
+```
 
 ### Important details
 
