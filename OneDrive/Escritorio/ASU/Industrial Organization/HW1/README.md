@@ -5,6 +5,7 @@
 - Figures: Contains the figures produced with the python code
 - HW1.py: Python program for generating results. Run time is about 40 minutes
 - HW1.pdf: PDF file with results for homework 1
+- homework_1.pdf: PDF file with problem description and quastions for homework 1
 
 ### Environment
 The following packages were used
