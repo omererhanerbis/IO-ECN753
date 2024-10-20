@@ -1,2 +1,4 @@
 # Ignore the extra files
 *demand_estimation_pytask
+# Ignore .DS.Store
+*.DS_Store
