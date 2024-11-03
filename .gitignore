@@ -2,3 +2,4 @@
 *demand_estimation_pytask
 # Ignore .DS.Store
 *.DS_Store
+*.gitignore
