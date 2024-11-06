@@ -2,3 +2,5 @@
 *demand_estimation_pytask
 # Ignore .DS.Store
 *.DS_Store
+*__pycache__
+*rust_1987/__pycache__
